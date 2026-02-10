@@ -13,6 +13,10 @@
 #include <algorithm>
 #include <omp.h>
 #include <thread>
+#include <vector>
+//#include <strings>
+#include <string>
+#include <cstdlib>
 
 #ifndef NOCDUA
 #include "cuda_testkernel.h"
@@ -20,11 +24,14 @@
 
 #include <stdlib.h>
 
-void Ped::Model::setup(std::vector<Ped::Tagent*> agentsInScenario, std::vector<Twaypoint*> destinationsInScenario, IMPLEMENTATION implementation)
+
+void Ped::Model::setup(std::vector<Ped::Tagent*> agentsInScenario, std::vector<Twaypoint*> destinationsInScenario, IMPLEMENTATION implementation, int max_threads)
 {
 #ifndef NOCUDA
 	// Convenience test: does CUDA work on this machine?
-	cuda_test();
+	if (implementation == Ped::CUDA) {
+        cuda_test();
+    }
 #else
     std::cout << "Not compiled for CUDA" << std::endl;
 #endif
@@ -38,16 +45,199 @@ void Ped::Model::setup(std::vector<Ped::Tagent*> agentsInScenario, std::vector<T
 	// Sets the chosen implemenation. Standard in the given code is SEQ
 	this->implementation = implementation;
 
+	if (max_threads > 0) this->setMaxThreads(max_threads);
+
 	// Set up heatmap (relevant for Assignment 4)
 	setupHeatmapSeq();
 }
 
-void Ped::Model::tick()
-{
-	// EDIT HERE FOR ASSIGNMENT 1
+
+/*static Ped::IMPLEMENTATION get_impl_env_or_fallback(Ped::IMPLEMENTATION fallback) {
+    const char* env = std::getenv("PED_IMPL");
+    if (!env || !*env) return fallback;
+
+    std::string s(env);
+    if (s == "seq" || s == "serial") return Ped::SEQ;
+    if (s == "omp") return Ped::OMP;
+    if (s == "threads" || s == "thr" || s == "pthread") return Ped::PTHREAD;
+
+    return fallback;
+}
+*/
+
+void Ped::Model::setMaxThreads(int maxThreads) {
+    if (maxThreads < 0) maxThreads = 0;
+    this->max_threads = maxThreads;
 }
 
-////////////
+int Ped::Model::getMaxThreads() const {
+    return this->max_threads;
+}
+
+
+static int get_max_threads_from_env() {
+    // OpenMP standard variable
+    const char* omp = std::getenv("OMP_NUM_THREADS");
+    if (omp && *omp) {
+        int v = std::atoi(omp);
+        if (v > 0) return v;
+    }
+
+    // Your C++ threads variable
+    const char* thr = std::getenv("PED_THREADS");
+    if (thr && *thr) {
+        int v = std::atoi(thr);
+        if (v > 0) return v;
+    }
+
+    return 0; // default/runtime
+}
+
+/*
+static unsigned int get_thread_count_env_or_hw(unsigned int fallback_hw) {
+    const char* env = std::getenv("PED_THREADS");
+    if (env && *env) {
+        int v = std::atoi(env);
+        if (v > 0) return (unsigned int)v;
+    }
+    return fallback_hw;
+}
+*/
+
+
+static unsigned int get_thread_count(int model_max_threads, unsigned int fallback_hw) {
+    if (model_max_threads > 0) return (unsigned int)model_max_threads;
+
+    const char* env = std::getenv("PED_THREADS");
+    if (env && *env) {
+        int v = std::atoi(env);
+        if (v > 0) return (unsigned int)v;
+    }
+
+    return fallback_hw;
+}
+
+
+static void tick_seq_impl(const std::vector<Ped::Tagent*>& agents) {
+    for (Ped::Tagent* a : agents) a->computeNextDesiredPosition();
+    for (Ped::Tagent* a : agents) {
+        a->setX(a->getDesiredX());
+        a->setY(a->getDesiredY());
+    }
+}
+/*
+static void tick_omp_impl(const std::vector<Ped::Tagent*>& agents) {
+    int N = (int)agents.size();
+
+    #pragma omp parallel for 
+    for (int i = 0; i < N; ++i) agents[i]->computeNextDesiredPosition();
+
+    #pragma omp parallel for 
+    for (int i = 0; i < N; ++i) {
+        agents[i]->setX(agents[i]->getDesiredX());
+        agents[i]->setY(agents[i]->getDesiredY());
+    }
+}
+*/
+static void tick_omp_impl(const std::vector<Ped::Tagent*>& agents, int max_threads) {
+    int N = (int)agents.size();
+    if (N == 0) return;
+
+    if (max_threads > 0) {
+        omp_set_num_threads(max_threads);
+    }
+
+    #pragma omp parallel
+    {
+        #pragma omp for 
+        for (int i = 0; i < N; ++i)
+            agents[i]->computeNextDesiredPosition();
+
+        #pragma omp for 
+        for (int i = 0; i < N; ++i) {
+            agents[i]->setX(agents[i]->getDesiredX());
+            agents[i]->setY(agents[i]->getDesiredY());
+        }
+    }
+    
+}
+
+
+
+static void tick_threads_impl(const std::vector<Ped::Tagent*>& agents, int max_threads) {
+    int N = (int)agents.size();
+    if (N == 0) return;
+
+    unsigned int hw = std::thread::hardware_concurrency();
+    if (hw == 0) hw = 4;
+
+    unsigned int T = get_thread_count(max_threads, hw);
+    if ((int)T > N) T = (unsigned int)N;
+    if (T == 0) T = 1;
+
+    int chunk = (N + (int)T - 1) / (int)T;
+
+    auto range_compute = [&](int start, int end) {
+        for (int i = start; i < end; ++i) agents[i]->computeNextDesiredPosition();
+    };
+
+    std::vector<std::thread> threads;
+    threads.reserve(T);
+    for (unsigned int t = 0; t < T; ++t) {
+        int start = (int)t * chunk;
+        int end = std::min(start + chunk, N);
+        if (start >= N) break;
+        threads.emplace_back(range_compute, start, end);
+    }
+    for (auto& th : threads) th.join();
+
+    threads.clear();
+
+    auto range_set = [&](int start, int end) {
+        for (int i = start; i < end; ++i) {
+            agents[i]->setX(agents[i]->getDesiredX());
+            agents[i]->setY(agents[i]->getDesiredY());
+        }
+    };
+
+    for (unsigned int t = 0; t < T; ++t) {
+        int start = (int)t * chunk;
+        int end = std::min(start + chunk, N);
+        if (start >= N) break;
+        threads.emplace_back(range_set, start, end);
+    }
+    for (auto& th : threads) th.join();
+}
+
+
+void Ped::Model::tick()
+{
+    int mt = this->max_threads;
+    if (mt == 0) mt = get_max_threads_from_env();
+
+    int N = (int)agents.size();
+    if (N == 0) return;
+
+    switch (this->implementation) {
+        case Ped::SEQ:
+            tick_seq_impl(agents);
+            break;
+        case Ped::OMP:
+            if (mt > N) mt = N; // don't spawn more threads than agents
+            tick_omp_impl(agents, mt);
+            break;
+        case PTHREAD:
+            tick_threads_impl(agents, mt);
+            break;
+        default:
+            tick_seq_impl(agents);
+            break;
+    }
+}
+
+
+
+
 /// Everything below here relevant for Assignment 3.
 /// Don't use this for Assignment 1!
 ///////////////////////////////////////////////

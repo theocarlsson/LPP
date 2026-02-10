@@ -1,13 +1,8 @@
 ///////////////////////////////////////////////////
 // Low Level Parallel Programming 2017.
 //
-// 
-//
 // The main starting point for the crowd simulation.
 //
-
-
-
 #undef max
 #include "ped_model.h"
 #include "ParseScenario.h"
@@ -36,7 +31,6 @@
 #include <unistd.h>
 #include <getopt.h>
 
-
 void print_usage(char *command) {
     printf("Usage: %s [--timing-mode|--export-trace[=export_trace.bin]] [--max-steps=100] [--help] [--cuda|--simd|--omp|--pthread|--seq] [scenario filename]\n", command);
     printf("There are three modes of execution:\n");
@@ -49,21 +43,19 @@ void print_usage(char *command) {
 }
 
 int main(int argc, char*argv[]) {
-    bool timing_mode = false;
+    bool timing_mode = true;
 #ifndef NOQT
     bool export_trace = false; // If no QT, export_trace is default
 #else
     bool export_trace = true;
 #endif
-    std::string scenefile = std::string("scenario.xml");
+    std::string scenefile = std::string("hugeScenario.xml");
     int max_steps = 1000;
     Ped::IMPLEMENTATION implementation_to_test = Ped::SEQ;
     std::string export_trace_file = "";
+    int max_threads = 0; // default thread count; can also set via --max-threads CLI arg
 
-    // Parsing the command line arguments. Feel free to add your own
-    // configurations.
-    // You may use the commented lines below to understand how to use the
-    // getopt tool.
+    // Parsing command line arguments
     while (1) {
         static struct option long_options[] = {
             {"timing-mode", no_argument, NULL, 't'},
@@ -81,168 +73,150 @@ int main(int argc, char*argv[]) {
         int option_index = 0;
         int long_opt = getopt_long(argc, argv, "", long_options, &option_index);
 
-        if (long_opt == -1) {
-            break;  // No more long options
-        }
+        if (long_opt == -1) break;  // No more options
 
         switch (long_opt) {
             case 't':
-                // Handle --timing-mode
                 std::cout << "Option --timing-mode activated\n";
                 timing_mode = true;
                 export_trace = false;
                 break;
             case 'e':
-                // Handle --export-trace
                 export_trace = true;
-                if (optarg != NULL) {
-                    // If an argument is provided, set it as the export filename
-                    export_trace_file = optarg;
-                } else {
-                    // If no argument is provided, use a default filename
-                    export_trace_file = "export_trace.bin";
-                }
+                export_trace_file = (optarg != NULL) ? optarg : "export_trace.bin";
                 std::cout << "Option --export-trace set to: " << export_trace_file << std::endl;
                 break;
             case 'h':
-                // Handle --help
                 print_usage(argv[0]);
                 exit(0);
-                break;
             case 'c':
-                // Handle --cuda
                 std::cout << "Option --cuda activated\n";
                 implementation_to_test = Ped::CUDA;
                 break;
             case 's':
-                // Handle --simd
                 std::cout << "Option --simd activated\n";
                 implementation_to_test = Ped::VECTOR;
                 break;
             case 'o':
-                // Handle --omp
                 std::cout << "Option --omp activated\n";
                 implementation_to_test = Ped::OMP;
                 break;
             case 'p':
-                // Handle --pthread
                 std::cout << "Option --pthread activated\n";
                 implementation_to_test = Ped::PTHREAD;
                 break;
             case 'q':
-                // Handle --seq
                 std::cout << "Option --seq activated\n";
                 implementation_to_test = Ped::SEQ;
                 break;
             case 'm':
-                // Handle --max-steps with a numerical argument
-                max_steps = std::stoi(optarg);  // Convert the argument to an integer
+                max_steps = std::stoi(optarg);
                 std::cout << "Option --max-steps set to: " << max_steps << std::endl;
                 break;
             default:
-                // Handle unknown long options
                 print_usage(argv[0]);
                 exit(1);
         }
     }
 
-    // Check if there is a filename argument (after all options)
     if (optind < argc) {
-        scenefile = argv[optind];  // Set scenefile to the provided filename
+        scenefile = argv[optind];  // Scenario file argument
     }
 
-    if (export_trace) {
-        if (max_steps > 200) {
-            std::cout << "Reducing the maximum number of steps to 200 for the tracing run." << std::endl;
-            std::cout << "The trace files can become really large!" << std::endl;
-            max_steps = 200;
-        }
+    if (export_trace && max_steps > 200) {
+        std::cout << "Reducing max_steps to 200 for tracing run." << std::endl;
+        max_steps = 200;
     }
 
     int retval = 0;
-    { // This scope is for the purpose of removing false memory leak positives
+    { // scope to avoid false memory leak positives
 
-        // Timing version
-        // Run twice, without the gui, to compare the runtimes.
         if (timing_mode) {
-            // Run sequentially
-            double fps_seq, fps_target;
-            {
+            // Timing version (repeats for stability)
+            int repeats = 10;
+            double avg_seq_ms = 0.0;
+            double avg_target_ms = 0.0;
+
+            // --- SEQ ---
+            for (int i = 0; i < repeats; ++i) {
                 Ped::Model model;
                 ParseScenario parser(scenefile);
-                model.setup(parser.getAgents(), parser.getWaypoints(), Ped::SEQ);
-                Simulation *simulation = new TimingSimulation(model, max_steps);
+                model.setup(parser.getAgents(), parser.getWaypoints(), Ped::SEQ, max_threads);
+                Simulation* sim = new TimingSimulation(model, max_steps);
 
-                // Simulation mode to use when profiling (without any GUI)
-                std::cout << "Running reference version...\n";
                 auto start = std::chrono::steady_clock::now();
-                simulation->runSimulation();
-                auto duration_seq = std::chrono::duration_cast<std::chrono::milliseconds> (std::chrono::steady_clock::now() - start);
-                fps_seq = ((float)simulation->getTickCount()) / ((float)duration_seq.count())*1000.0;
-                cout << "Reference time: " << duration_seq.count() << " milliseconds, " << fps_seq << " Frames Per Second." << std::endl;
-
-                delete simulation;
+                sim->runSimulation();
+                auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - start);
+                avg_seq_ms += duration.count();
+                delete sim;
             }
+            avg_seq_ms /= repeats;
+            std::cout << "SEQ average time: " << avg_seq_ms << " ms" << std::endl;
 
-            {
+            // --- Target Implementation ---
+            for (int i = 0; i < repeats; ++i) {
                 Ped::Model model;
                 ParseScenario parser(scenefile);
-                model.setup(parser.getAgents(), parser.getWaypoints(), implementation_to_test);
-                Simulation *simulation = new TimingSimulation(model, max_steps);
-                // Simulation mode to use when profiling (without any GUI)
-                std::cout << "Running target version...\n";
-                auto start = std::chrono::steady_clock::now();
-                simulation->runSimulation();
-                auto duration_target = std::chrono::duration_cast<std::chrono::milliseconds> (std::chrono::steady_clock::now() - start);
-                fps_target = ((float)simulation->getTickCount()) / ((float)duration_target.count())*1000.0;
-                cout << "Target time: " << duration_target.count() << " milliseconds, " << fps_target << " Frames Per Second." << std::endl;
+                model.setup(parser.getAgents(), parser.getWaypoints(), implementation_to_test, max_threads);
+                Simulation* sim = new TimingSimulation(model, max_steps);
 
-                delete simulation;
+                auto start = std::chrono::steady_clock::now();
+                sim->runSimulation();
+                auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - start);
+                avg_target_ms += duration.count();
+                delete sim;
             }
-            std::cout << "\n\nSpeedup: " << fps_target / fps_seq << std::endl;
-        } else if (export_trace) {
-                Ped::Model model;
-                ParseScenario parser(scenefile);
-                model.setup(parser.getAgents(), parser.getWaypoints(), implementation_to_test);
+            avg_target_ms /= repeats;
+            std::cout << "Target average time: " << avg_target_ms << " ms" << std::endl;
 
-                Simulation *simulation = new ExportSimulation(model, max_steps, export_trace_file);
+            std::cout << "Speedup: " << avg_seq_ms / avg_target_ms << std::endl;
+        }
+        else if (export_trace) {
+            Ped::Model model;
+            ParseScenario parser(scenefile);
+            model.setup(parser.getAgents(), parser.getWaypoints(), implementation_to_test, max_threads);
 
-                std::cout << "Running Export Tracer...\n";
-                auto start = std::chrono::steady_clock::now();
-                simulation->runSimulation();
-                auto duration_target = std::chrono::duration_cast<std::chrono::milliseconds> (std::chrono::steady_clock::now() - start);
-                float fps = ((float)simulation->getTickCount()) / ((float)duration_target.count())*1000.0;
-                cout << "Time: " << duration_target.count() << " milliseconds, " << fps << " Frames Per Second." << std::endl;
+            Simulation* simulation = new ExportSimulation(model, max_steps, export_trace_file);
 
-                delete simulation;
+            std::cout << "Running Export Tracer...\n";
+            auto start = std::chrono::steady_clock::now();
+            simulation->runSimulation();
+            auto duration_target = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start);
+            float fps = ((float)simulation->getTickCount()) / ((float)duration_target.count())*1000.0;
+            std::cout << "Time: " << duration_target.count() << " milliseconds, " << fps << " Frames Per Second." << std::endl;
+
+            delete simulation;
+        }
 #ifndef NOQT
-        } else {
+        else {
             // Graphics version
             Ped::Model model;
             ParseScenario parser(scenefile);
-            model.setup(parser.getAgents(), parser.getWaypoints(), implementation_to_test);
+            model.setup(parser.getAgents(), parser.getWaypoints(), implementation_to_test, max_threads);
 
             QApplication app(argc, argv);
             MainWindow mainwindow(model);
 
             QTSimulation simulation(model, max_steps, &mainwindow);
 
-            cout << "Demo setup complete, running ..." << endl;
+            std::cout << "Demo setup complete, running ..." << std::endl;
 
-            // Simulation mode to use when visualizing
             auto start = std::chrono::steady_clock::now();
             mainwindow.show();
             simulation.runSimulation();
             retval = app.exec();
 
-            auto duration = std::chrono::duration_cast<std::chrono::milliseconds> (std::chrono::steady_clock::now() - start);
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start);
             float fps = ((float)simulation.getTickCount()) / ((float)duration.count())*1000.0;
-            cout << "Time: " << duration.count() << " milliseconds, " << fps << " Frames Per Second." << std::endl;
-
-#endif
+            std::cout << "Time: " << duration.count() << " milliseconds, " << fps << " Frames Per Second." << std::endl;
         }
+#endif
     }
 
-    cout << "Done" << endl;
+    std::cout << "Done" << std::endl;
     return retval;
 }

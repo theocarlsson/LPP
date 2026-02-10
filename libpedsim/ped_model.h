@@ -29,7 +29,7 @@ namespace Ped{
 	public:
 
 		// Sets everything up
-		void setup(std::vector<Tagent*> agentsInScenario, std::vector<Twaypoint*> destinationsInScenario,IMPLEMENTATION implementation);
+		void setup(std::vector<Tagent*> agentsInScenario, std::vector<Twaypoint*> destinationsInScenario,IMPLEMENTATION implementation, int max_threads);
 		
 		// Coordinates a time step in the scenario: move all agents by one step (if applicable).
 		void tick();
@@ -48,6 +48,9 @@ namespace Ped{
 		int const * const * getHeatmap() const { return blurred_heatmap; };
 		int getHeatmapSize() const;
 
+		void setMaxThreads(int maxThreads);
+        int getMaxThreads() const;
+
 	private:
 
 		// Denotes which implementation (sequential, parallel implementations..)
@@ -63,6 +66,8 @@ namespace Ped{
 
 		// Moves an agent towards its next position
 		void move(Ped::Tagent *agent);
+
+		int max_threads = 2; 
 
 		////////////
 		/// Everything below here won't be relevant until Assignment 3
