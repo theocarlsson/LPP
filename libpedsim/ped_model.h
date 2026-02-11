@@ -22,7 +22,7 @@ namespace Ped{
 
 	// The implementation modes for Assignment 1 + 2:
 	// chooses which implementation to use for tick()
-	enum IMPLEMENTATION { CUDA, VECTOR, OMP, PTHREAD, SEQ };
+	enum IMPLEMENTATION { CUDA, VECTOR, OMP, PTHREAD, SEQ, SIMD };
 
 	class Model
 	{
@@ -63,6 +63,31 @@ namespace Ped{
 
 		// The waypoints in this scenario
 		std::vector<Twaypoint*> destinations;
+
+		// Current positions
+        std::vector<double> posX;
+        std::vector<double> posY;
+
+        // Destination positions
+        std::vector<double> destX;
+        std::vector<double> destY;
+
+        // Computed desired positions
+        std::vector<double> desiredX;
+        std::vector<double> desiredY;
+
+		static constexpr int MAX_WAYPOINTS = 16;
+
+		// Number of waypoints each agent has
+		std::vector<int> numWaypoints;          // total waypoints for each agent
+		std::vector<int> currentWaypointIndex;  // current waypoint index per agent
+
+		// Waypoints coordinates per agent
+		std::vector<std::array<double, MAX_WAYPOINTS>> waypointsX;
+		std::vector<std::array<double, MAX_WAYPOINTS>> waypointsY;
+
+		// Destination radius per waypoint
+		std::vector<std::array<double, MAX_WAYPOINTS>> waypointR;
 
 		// Moves an agent towards its next position
 		void move(Ped::Tagent *agent);

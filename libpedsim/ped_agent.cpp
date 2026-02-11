@@ -41,6 +41,10 @@ void Ped::Tagent::computeNextDesiredPosition() {
 	desiredPositionY = (int)round(y + diffY / len);
 }
 
+void Ped::Tagent::updateDestination() {
+    destination = getNextDestination();
+}
+
 void Ped::Tagent::addWaypoint(Twaypoint* wp) {
 	waypoints.push_back(wp);
 }

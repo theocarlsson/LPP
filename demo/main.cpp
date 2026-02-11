@@ -53,7 +53,7 @@ int main(int argc, char*argv[]) {
     int max_steps = 1000;
     Ped::IMPLEMENTATION implementation_to_test = Ped::SEQ;
     std::string export_trace_file = "";
-    int max_threads = 0; // default thread count; can also set via --max-threads CLI arg
+    int max_threads = 8; // default thread count; can also set via --max-threads CLI arg
 
     // Parsing command line arguments
     while (1) {
