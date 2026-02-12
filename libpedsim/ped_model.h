@@ -65,16 +65,16 @@ namespace Ped{
 		std::vector<Twaypoint*> destinations;
 
 		// Current positions
-        std::vector<double> posX;
-        std::vector<double> posY;
+        std::vector<float> posX;
+        std::vector<float> posY;
 
         // Destination positions
-        std::vector<double> destX;
-        std::vector<double> destY;
+        std::vector<float> destX;
+        std::vector<float> destY;
 
         // Computed desired positions
-        std::vector<double> desiredX;
-        std::vector<double> desiredY;
+        std::vector<float> desiredX;
+        std::vector<float> desiredY;
 
 		static constexpr int MAX_WAYPOINTS = 16;
 
@@ -83,11 +83,11 @@ namespace Ped{
 		std::vector<int> currentWaypointIndex;  // current waypoint index per agent
 
 		// Waypoints coordinates per agent
-		std::vector<std::array<double, MAX_WAYPOINTS>> waypointsX;
-		std::vector<std::array<double, MAX_WAYPOINTS>> waypointsY;
+		std::vector<std::array<float, MAX_WAYPOINTS>> waypointsX;
+		std::vector<std::array<float, MAX_WAYPOINTS>> waypointsY;
 
 		// Destination radius per waypoint
-		std::vector<std::array<double, MAX_WAYPOINTS>> waypointR;
+		std::vector<std::array<float, MAX_WAYPOINTS>> waypointR;
 
 		// Moves an agent towards its next position
 		void move(Ped::Tagent *agent);

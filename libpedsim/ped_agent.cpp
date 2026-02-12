@@ -34,9 +34,9 @@ void Ped::Tagent::computeNextDesiredPosition() {
 		return;
 	}
 
-	double diffX = destination->getx() - x;
-	double diffY = destination->gety() - y;
-	double len = sqrt(diffX * diffX + diffY * diffY);
+	float diffX = destination->getx() - x;
+	float diffY = destination->gety() - y;
+	float len = sqrt(diffX * diffX + diffY * diffY);
 	desiredPositionX = (int)round(x + diffX / len);
 	desiredPositionY = (int)round(y + diffY / len);
 }
@@ -55,9 +55,9 @@ Ped::Twaypoint* Ped::Tagent::getNextDestination() {
 
 	if (destination != NULL) {
 		// compute if agent reached its current destination
-		double diffX = destination->getx() - x;
-		double diffY = destination->gety() - y;
-		double length = sqrt(diffX * diffX + diffY * diffY);
+		float diffX = destination->getx() - x;
+		float diffY = destination->gety() - y;
+		float length = sqrt(diffX * diffX + diffY * diffY);
 		agentReachedDestination = length < destination->getr();
 	}
 

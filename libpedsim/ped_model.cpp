@@ -60,9 +60,9 @@ void Ped::Model::setup(std::vector<Ped::Tagent*> agentsInScenario, std::vector<T
         Ped::Tagent* agent = agents[i];        // get pointer to this agent
         int wpCount = agent->getNumWaypoints();
         for (int j = 0; j < wpCount && j < MAX_WAYPOINTS; ++j) {
-            waypointsX[i][j] = (double)agent->getWaypoint(j)->getx();
-            waypointsY[i][j] = (double)agent->getWaypoint(j)->gety();
-            waypointR[i][j]  = (double)agent->getWaypoint(j)->getr();
+            waypointsX[i][j] = (float)agent->getWaypoint(j)->getx();
+            waypointsY[i][j] = (float)agent->getWaypoint(j)->gety();
+            waypointR[i][j]  = (float)agent->getWaypoint(j)->getr();
         }
     }
 
@@ -262,84 +262,85 @@ void Ped::Model::tick()
             int N = (int)agents.size();
             if (N == 0) return;
 
-            // -------------------------------
-            // 1. Compute next destinations
-            // -------------------------------
+            #pragma omp for
             for (int i = 0; i < N; ++i) {
-                if (currentWaypointIndex[i] >= numWaypoints[i]) continue;
+                posX[i] = agents[i]->getX();
+                posY[i] = agents[i]->getY();
 
-                double dx = waypointsX[i][currentWaypointIndex[i]] - posX[i];
-                double dy = waypointsY[i][currentWaypointIndex[i]] - posY[i];
-                double len2 = dx*dx + dy*dy;
+                Ped::Twaypoint* dest = agents[i]->getDestination();
 
-                // Reached waypoint?
-                if (len2 < waypointR[i][currentWaypointIndex[i]]*waypointR[i][currentWaypointIndex[i]]) {
-                    currentWaypointIndex[i]++;
-                }
-
-                // Set destination
-                if (currentWaypointIndex[i] < numWaypoints[i]) {
-                    destX[i] = waypointsX[i][currentWaypointIndex[i]];
-                    destY[i] = waypointsY[i][currentWaypointIndex[i]];
+                if (dest != nullptr) {
+                    destX[i] = dest->getx();
+                    destY[i] = dest->gety();
                 } else {
+                    // If no destination, stay in place
                     destX[i] = posX[i];
                     destY[i] = posY[i];
                 }
             }
 
-            // -------------------------------
-            // 2. Vectorized movement
-            // -------------------------------
+     
             int i = 0;
             for (; i <= N - 4; i += 4) {
-                __m256d x  = _mm256_loadu_pd(&posX[i]);
-                __m256d y  = _mm256_loadu_pd(&posY[i]);
-                __m256d dx = _mm256_loadu_pd(&destX[i]);
-                __m256d dy = _mm256_loadu_pd(&destY[i]);
 
-                __m256d diffX = _mm256_sub_pd(dx, x);
-                __m256d diffY = _mm256_sub_pd(dy, y);
-                __m256d len2 = _mm256_add_pd(_mm256_mul_pd(diffX,diffX), _mm256_mul_pd(diffY,diffY));
-                __m256d len  = _mm256_sqrt_pd(len2);
+                __m128 x  = _mm_loadu_ps(&posX[i]);
+                __m128 y  = _mm_loadu_ps(&posY[i]);
+                __m128 dx = _mm_loadu_ps(&destX[i]);
+                __m128 dy = _mm_loadu_ps(&destY[i]);
 
-                // Avoid division by zero
-                __m256d mask = _mm256_cmp_pd(len, _mm256_set1_pd(1e-9), _CMP_GT_OQ);
-                __m256d stepX = _mm256_blendv_pd(_mm256_set1_pd(0.0), _mm256_div_pd(diffX, len), mask);
-                __m256d stepY = _mm256_blendv_pd(_mm256_set1_pd(0.0), _mm256_div_pd(diffY, len), mask);
+                __m128 diffX = _mm_sub_ps(dx, x);
+                __m128 diffY = _mm_sub_ps(dy, y);
 
-                _mm256_storeu_pd(&desiredX[i], _mm256_add_pd(x, stepX));
-                _mm256_storeu_pd(&desiredY[i], _mm256_add_pd(y, stepY));
+                __m128 len2 = _mm_add_ps(
+                    _mm_mul_ps(diffX, diffX),
+                    _mm_mul_ps(diffY, diffY)
+                );
+
+                __m128 len = _mm_sqrt_ps(len2);
+
+                __m128 eps  = _mm_set1_ps(1e-9);
+                __m128 mask = _mm_cmp_ps(len, eps, _CMP_GT_OQ);
+
+                __m128 stepX = _mm_blendv_ps(
+                    _mm_setzero_ps(),
+                    _mm_div_ps(diffX, len),
+                    mask
+                );
+
+                __m128 stepY = _mm_blendv_ps(
+                    _mm_setzero_ps(),
+                    _mm_div_ps(diffY, len),
+                    mask
+                );
+
+                __m128 newX = _mm_add_ps(x, stepX);
+                __m128 newY = _mm_add_ps(y, stepY);
+
+                _mm_storeu_ps(&desiredX[i], newX);
+                _mm_storeu_ps(&desiredY[i], newY);
             }
 
-            // Tail loop
+  
             for (; i < N; ++i) {
-                double dx = destX[i] - posX[i];
-                double dy = destY[i] - posY[i];
-                double len = sqrt(dx*dx + dy*dy);
-                if (len > 1e-9) {
-                    desiredX[i] = posX[i] + dx/len;
-                    desiredY[i] = posY[i] + dy/len;
+                float dx = destX[i] - posX[i];
+                float dy = destY[i] - posY[i];
+                float len = sqrt(dx*dx + dy*dy);
+
+                if (len > 1e-9f) {
+                    desiredX[i] = posX[i] + dx / len;
+                    desiredY[i] = posY[i] + dy / len;
                 } else {
                     desiredX[i] = posX[i];
                     desiredY[i] = posY[i];
                 }
             }
 
-            // -------------------------------
-            // 3. Update main positions
-            // -------------------------------
+
             for (int i = 0; i < N; ++i) {
-                posX[i] = desiredX[i];
-                posY[i] = desiredY[i];
+                agents[i]->setX((int)(desiredX[i] + 0.5));
+                agents[i]->setY((int)(desiredY[i] + 0.5));
             }
 
-            // -------------------------------
-            // 4. Write back to agents (optional)
-            // -------------------------------
-            for (int i = 0; i < N; ++i) {
-                agents[i]->setX((int)round(posX[i]));
-                agents[i]->setY((int)round(posY[i]));
-            }
             break;
         }
         default:
@@ -373,22 +374,22 @@ void Ped::Model::move(Ped::Tagent *agent)
 	// Compute the three alternative positions that would bring the agent
 	// closer to his desiredPosition, starting with the desiredPosition itself
 	std::vector<std::pair<int, int> > prioritizedAlternatives;
-	std::pair<int, int> pDesired(agent->getDesiredX(), agent->getDesiredY());
-	prioritizedAlternatives.push_back(pDesired);
+	std::pair<int, int> psesired(agent->getDesiredX(), agent->getDesiredY());
+	prioritizedAlternatives.push_back(psesired);
 
-	int diffX = pDesired.first - agent->getX();
-	int diffY = pDesired.second - agent->getY();
+	int diffX = psesired.first - agent->getX();
+	int diffY = psesired.second - agent->getY();
 	std::pair<int, int> p1, p2;
 	if (diffX == 0 || diffY == 0)
 	{
 		// Agent wants to walk straight to North, South, West or East
-		p1 = std::make_pair(pDesired.first + diffY, pDesired.second + diffX);
-		p2 = std::make_pair(pDesired.first - diffY, pDesired.second - diffX);
+		p1 = std::make_pair(psesired.first + diffY, psesired.second + diffX);
+		p2 = std::make_pair(psesired.first - diffY, psesired.second - diffX);
 	}
 	else {
 		// Agent wants to walk diagonally
-		p1 = std::make_pair(pDesired.first, agent->getY());
-		p2 = std::make_pair(agent->getX(), pDesired.second);
+		p1 = std::make_pair(psesired.first, agent->getY());
+		p2 = std::make_pair(agent->getX(), psesired.second);
 	}
 	prioritizedAlternatives.push_back(p1);
 	prioritizedAlternatives.push_back(p2);

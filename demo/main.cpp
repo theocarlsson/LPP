@@ -67,6 +67,7 @@ int main(int argc, char*argv[]) {
             {"omp", no_argument, NULL, 'o'},
             {"pthread", no_argument, NULL, 'p'},
             {"seq", no_argument, NULL, 'q'},
+            {"max-threads", required_argument, NULL, 'x'},
             {0, 0, 0, 0}  // End of options
         };
 
@@ -112,6 +113,10 @@ int main(int argc, char*argv[]) {
             case 'm':
                 max_steps = std::stoi(optarg);
                 std::cout << "Option --max-steps set to: " << max_steps << std::endl;
+                break;
+            case 'x':
+                max_threads = std::stoi(optarg);
+                std::cout << "Option --max-threads set to: " << max_threads << std::endl;
                 break;
             default:
                 print_usage(argv[0]);
