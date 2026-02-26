@@ -231,8 +231,10 @@ def plot(file, offsets, num_steps):
         update_plot(current_step)
 
     checkbox.on_clicked(toggle_heatmap)
-
+    fig.savefig('frame_preview.png', dpi=150, bbox_inches='tight')
+    print("Saved frame_preview.png")
     plt.show()
+    
 
 def main():
     # Check if filename is provided as command line argument

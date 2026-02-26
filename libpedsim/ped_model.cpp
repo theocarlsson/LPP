@@ -19,12 +19,18 @@
 #include <cstdlib>
 #include <cmath>
 #include <immintrin.h>
+#include <mutex>
+#include <unordered_set>
+#include <memory>
 
 #ifndef NOCDUA
 #include "cuda_testkernel.h"
 #endif
 
 #include <stdlib.h>
+
+std::mutex gridMutex;
+std::unordered_set<long long> reservedPositions; // Stores occupied positions
 
 
 void Ped::Model::setup(std::vector<Ped::Tagent*> agentsInScenario, std::vector<Twaypoint*> destinationsInScenario, IMPLEMENTATION implementation, int max_threads)
@@ -76,6 +82,60 @@ void Ped::Model::setup(std::vector<Ped::Tagent*> agentsInScenario, std::vector<T
 
 	// Set up heatmap (relevant for Assignment 4)
 	setupHeatmapSeq();
+
+    int regionWidth  = worldWidth  / numRegionsX;
+    int regionHeight = worldHeight / numRegionsY;
+
+    if (worldWidth <= 0 || worldHeight <= 0) {
+        throw std::runtime_error("Invalid world dimensions");
+    }
+
+    regions.clear();
+    regions = std::vector<Region>(numRegionsX * numRegionsY);
+
+    int index = 0;
+    for (int rx = 0; rx < numRegionsX; ++rx) {
+        for (int ry = 0; ry < numRegionsY; ++ry) {
+
+            Region& r = regions[index++];
+
+            r.x0 = rx * regionWidth;
+            r.y0 = ry * regionHeight;
+            // Ensure last region doesn't exceed world size
+            if (rx == numRegionsX - 1) r.x1 = worldWidth;
+            if (ry == numRegionsY - 1) r.y1 = worldHeight;
+        }
+    }
+
+    // Assign agents to regions
+    for (Ped::Tagent* agent : agents) {
+        int x = agent->getX();
+        int y = agent->getY();
+        for (Region& r : regions) {
+            if (x >= r.x0 && x < r.x1 && y >= r.y0 && y < r.y1) {
+                r.agents.push_back(agent);
+                break;
+            }
+        }
+    }
+
+    cellLocks.clear();
+    cellLocks.resize(worldWidth);
+
+    for (int x = 0; x < worldWidth; ++x) {
+        cellLocks[x].resize(worldHeight);
+        for (int y = 0; y < worldHeight; ++y) {
+            cellLocks[x][y] = std::make_unique<std::mutex>();
+        }
+    }
+
+    // --- Initialize occupancy grid ---
+    cellOccupied.clear();
+    cellOccupied.resize(worldWidth);
+
+    for (int x = 0; x < worldWidth; ++x) {
+        cellOccupied[x].resize(worldHeight, false);
+    }
 }
 
 
@@ -144,12 +204,17 @@ static unsigned int get_thread_count(int model_max_threads, unsigned int fallbac
     return fallback_hw;
 }
 
+void Ped::Model::moveAgent(Ped::Tagent* agent)
+{
+    move(agent);   // call private function internally
+}
 
-static void tick_seq_impl(const std::vector<Ped::Tagent*>& agents) {
+
+static void tick_seq_impl(const std::vector<Ped::Tagent*>& agents,
+                          Ped::Model* model) {
     for (Ped::Tagent* a : agents) a->computeNextDesiredPosition();
     for (Ped::Tagent* a : agents) {
-        a->setX(a->getDesiredX());
-        a->setY(a->getDesiredY());
+        model->moveAgent(a);
     }
 }
 /*
@@ -166,7 +231,9 @@ static void tick_omp_impl(const std::vector<Ped::Tagent*>& agents) {
     }
 }
 */
-static void tick_omp_impl(const std::vector<Ped::Tagent*>& agents, int max_threads) {
+static void tick_omp_impl(const std::vector<Ped::Tagent*>& agents,
+                          Ped::Model* model,
+                          int max_threads) {
     int N = (int)agents.size();
     if (N == 0) return;
 
@@ -181,9 +248,8 @@ static void tick_omp_impl(const std::vector<Ped::Tagent*>& agents, int max_threa
             agents[i]->computeNextDesiredPosition();
 
         #pragma omp for 
-        for (int i = 0; i < N; ++i) {
-            agents[i]->setX(agents[i]->getDesiredX());
-            agents[i]->setY(agents[i]->getDesiredY());
+        for (int i = 0; i < N; ++i){
+            model->moveAgent(agents[i]);
         }
     }
     
@@ -191,7 +257,7 @@ static void tick_omp_impl(const std::vector<Ped::Tagent*>& agents, int max_threa
 
 
 
-static void tick_threads_impl(const std::vector<Ped::Tagent*>& agents, int max_threads) {
+static void tick_threads_impl(const std::vector<Ped::Tagent*>& agents, Ped::Model* model, int max_threads) {
     int N = (int)agents.size();
     if (N == 0) return;
 
@@ -221,9 +287,8 @@ static void tick_threads_impl(const std::vector<Ped::Tagent*>& agents, int max_t
     threads.clear();
 
     auto range_set = [&](int start, int end) {
-        for (int i = start; i < end; ++i) {
-            agents[i]->setX(agents[i]->getDesiredX());
-            agents[i]->setY(agents[i]->getDesiredY());
+        for (int i = 0; i < N; ++i){
+            model->moveAgent(agents[i]);
         }
     };
 
@@ -236,9 +301,69 @@ static void tick_threads_impl(const std::vector<Ped::Tagent*>& agents, int max_t
     for (auto& th : threads) th.join();
 }
 
+void Ped::Model::tick_region_impl() {
+    // Phase 1: parallel per region
+    #pragma omp parallel for
+    for (int ri = 0; ri < (int)regions.size(); ++ri) {
+        Region& r = regions[ri];
+        std::vector<Ped::Tagent*> movedAgents;
+
+        for (Ped::Tagent* agent : r.agents) {
+            agent->computeNextDesiredPosition();
+            int newX = agent->getDesiredX();
+            int newY = agent->getDesiredY();
+
+            // check if inside region
+            if (newX >= r.x0 && newX < r.x1 && newY >= r.y0 && newY < r.y1) {
+                agent->setX(newX);
+                agent->setY(newY);
+            } else {
+                // Crossed border → store for transfer
+                if (newX < 0 || newX >= worldWidth || newY < 0 || newY >= worldHeight) {
+                    std::cerr << "Warning: agent out of bounds: " << newX << "," << newY << std::endl;
+                    newX = std::max(0, std::min(newX, worldWidth-1));
+                    newY = std::max(0, std::min(newY, worldHeight-1));
+                }
+                std::lock_guard<std::mutex> lock(*cellLocks[newX][newY]);
+                r.agentsToTransfer.push_back(agent);
+                agent->setX(newX);
+                agent->setY(newY);
+            }
+        }
+    }
+
+    // Phase 2: serially transfer agents across regions
+    for (Region& r : regions) {
+        if (r.agentsToTransfer.empty()) continue;
+
+        for (Ped::Tagent* agent : r.agentsToTransfer) {
+            // remove from old region
+            auto it = std::find(r.agents.begin(), r.agents.end(), agent);
+            if (it != r.agents.end()) r.agents.erase(it);
+
+            // add to new region
+            Region* newR = getRegionFor(agent->getX(), agent->getY());
+            if (newR != nullptr) {
+                std::lock_guard<std::mutex> lock(newR->borderMutex);
+                newR->agents.push_back(agent);
+            }
+        }
+        r.agentsToTransfer.clear();
+    }
+}
+
+Ped::Region* Ped::Model::getRegionFor(int x, int y) {
+    for (Region& r : regions) {
+        if (x >= r.x0 && x < r.x1 && y >= r.y0 && y < r.y1)
+            return &r;
+    }
+    return nullptr; // fallback
+}
+
 
 void Ped::Model::tick()
 {
+    reservedPositions.clear();
     int mt = this->max_threads;
     if (mt == 0) mt = get_max_threads_from_env();
 
@@ -247,14 +372,18 @@ void Ped::Model::tick()
 
     switch (this->implementation) {
         case Ped::SEQ:
-            tick_seq_impl(agents);
+            tick_seq_impl(agents, this);
             break;
         case Ped::OMP:
             if (mt > N) mt = N; // don't spawn more threads than agents
-            tick_omp_impl(agents, mt);
+            tick_omp_impl(agents, this, mt);
             break;
         case PTHREAD:
-            tick_threads_impl(agents, mt);
+            tick_threads_impl(agents,this, mt);
+            break;
+
+        case Ped::REGION:
+            tick_region_impl();
             break;
 
         case Ped::VECTOR:
@@ -344,7 +473,7 @@ void Ped::Model::tick()
             break;
         }
         default:
-            tick_seq_impl(agents);
+            tick_seq_impl(agents, this);
             break;
         
     }
@@ -359,54 +488,44 @@ void Ped::Model::tick()
 
 // Moves the agent to the next desired position. If already taken, it will
 // be moved to a location close to it.
+
+
+
+
+
+long long encodePos(int x, int y) {
+    return ((long long)x << 32) | (unsigned int)y; // Unique key for each cell
+}
+
 void Ped::Model::move(Ped::Tagent *agent)
 {
-	// Search for neighboring agents
-	set<const Ped::Tagent *> neighbors = getNeighbors(agent->getX(), agent->getY(), 2);
+	 int x0 = agent->getX();
+    int y0 = agent->getY();
+    int dx = agent->getDesiredX();
+    int dy = agent->getDesiredY();
 
-	// Retrieve their positions
-	std::vector<std::pair<int, int> > takenPositions;
-	for (std::set<const Ped::Tagent*>::iterator neighborIt = neighbors.begin(); neighborIt != neighbors.end(); ++neighborIt) {
-		std::pair<int, int> position((*neighborIt)->getX(), (*neighborIt)->getY());
-		takenPositions.push_back(position);
-	}
+    std::vector<std::pair<int,int>> candidates = {
+        {dx, dy},
+        {x0+1, y0}, {x0-1, y0}, {x0, y0+1}, {x0, y0-1},
+        {x0+1, y0+1}, {x0-1, y0-1}, {x0+1, y0-1}, {x0-1, y0+1}
+    };
 
-	// Compute the three alternative positions that would bring the agent
-	// closer to his desiredPosition, starting with the desiredPosition itself
-	std::vector<std::pair<int, int> > prioritizedAlternatives;
-	std::pair<int, int> psesired(agent->getDesiredX(), agent->getDesiredY());
-	prioritizedAlternatives.push_back(psesired);
+    for (auto& pos : candidates) {
+        if (pos.first < 0 || pos.second < 0 ||
+        pos.first >= worldWidth || pos.second >= worldHeight) continue;
 
-	int diffX = psesired.first - agent->getX();
-	int diffY = psesired.second - agent->getY();
-	std::pair<int, int> p1, p2;
-	if (diffX == 0 || diffY == 0)
-	{
-		// Agent wants to walk straight to North, South, West or East
-		p1 = std::make_pair(psesired.first + diffY, psesired.second + diffX);
-		p2 = std::make_pair(psesired.first - diffY, psesired.second - diffX);
-	}
-	else {
-		// Agent wants to walk diagonally
-		p1 = std::make_pair(psesired.first, agent->getY());
-		p2 = std::make_pair(agent->getX(), psesired.second);
-	}
-	prioritizedAlternatives.push_back(p1);
-	prioritizedAlternatives.push_back(p2);
+        std::lock_guard<std::mutex> lock(*cellLocks[pos.first][pos.second]);
+        if (!cellOccupied[pos.first][pos.second]) {
+            cellOccupied[pos.first][pos.second] = true;
+            agent->setX(pos.first);
+            agent->setY(pos.second);
+            return;
+        }
+    }
 
-	// Find the first empty alternative position
-	for (std::vector<pair<int, int> >::iterator it = prioritizedAlternatives.begin(); it != prioritizedAlternatives.end(); ++it) {
-
-		// If the current position is not yet taken by any neighbor
-		if (std::find(takenPositions.begin(), takenPositions.end(), *it) == takenPositions.end()) {
-
-			// Set the agent's position 
-			agent->setX((*it).first);
-			agent->setY((*it).second);
-
-			break;
-		}
-	}
+    // Stay in place
+    agent->setX(x0);
+    agent->setY(y0);
 }
 
 /// Returns the list of neighbors within dist of the point x/y. This
@@ -416,11 +535,20 @@ void Ped::Model::move(Ped::Tagent *agent)
 /// \param   x the x coordinate
 /// \param   y the y coordinate
 /// \param   dist the distance around x/y that will be searched for agents (search field is a square in the current implementation)
-set<const Ped::Tagent*> Ped::Model::getNeighbors(int x, int y, int dist) const {
+set<const Ped::Tagent*> Ped::Model::getNeighbors(int x, int y, int dist, const Ped::Tagent* self) const {
 
-	// create the output list
-	// ( It would be better to include only the agents close by, but this programmer is lazy.)	
-	return set<const Ped::Tagent*>(agents.begin(), agents.end());
+	set<const Ped::Tagent*> neighbors;
+
+    for (Ped::Tagent* a : agents) {
+        if (a == self) continue; // ignore self
+        int dx = std::abs(a->getX() - x);
+        int dy = std::abs(a->getY() - y);
+        if (dx <= dist && dy <= dist) {
+            neighbors.insert(a);
+        }
+    }
+
+    return neighbors;
 }
 
 void Ped::Model::cleanup() {

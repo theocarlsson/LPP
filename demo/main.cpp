@@ -68,6 +68,7 @@ int main(int argc, char*argv[]) {
             {"pthread", no_argument, NULL, 'p'},
             {"seq", no_argument, NULL, 'q'},
             {"max-threads", required_argument, NULL, 'x'},
+            {"region", no_argument, NULL, 'r'},
             {0, 0, 0, 0}  // End of options
         };
 
@@ -84,6 +85,7 @@ int main(int argc, char*argv[]) {
                 break;
             case 'e':
                 export_trace = true;
+                timing_mode = false;
                 export_trace_file = (optarg != NULL) ? optarg : "export_trace.bin";
                 std::cout << "Option --export-trace set to: " << export_trace_file << std::endl;
                 break;
@@ -117,6 +119,10 @@ int main(int argc, char*argv[]) {
             case 'x':
                 max_threads = std::stoi(optarg);
                 std::cout << "Option --max-threads set to: " << max_threads << std::endl;
+                break;
+            case 'r':
+                std::cout << "Option --region activated\n";
+                implementation_to_test = Ped::REGION;
                 break;
             default:
                 print_usage(argv[0]);

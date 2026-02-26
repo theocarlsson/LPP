@@ -14,15 +14,31 @@
 #include <vector>
 #include <map>
 #include <set>
+#include <mutex>
+#include <memory>
 
 #include "ped_agent.h"
 
 namespace Ped{
 	class Tagent;
 
+	struct Region {
+		int x0, y0, x1, y1;
+		std::vector<Tagent*> agents;
+		std::mutex borderMutex;
+		std::vector<Tagent*> agentsToTransfer;
+
+		Region() = default;
+
+		Region(const Region&) = delete;
+		Region& operator=(const Region&) = delete;
+		Region(Region&&) = delete;
+		Region& operator=(Region&&) = delete;
+	};
+
 	// The implementation modes for Assignment 1 + 2:
 	// chooses which implementation to use for tick()
-	enum IMPLEMENTATION { CUDA, VECTOR, OMP, PTHREAD, SEQ, SIMD };
+	enum IMPLEMENTATION { CUDA, VECTOR, OMP, PTHREAD, SEQ, SIMD, REGION };
 
 	class Model
 	{
@@ -50,6 +66,9 @@ namespace Ped{
 
 		void setMaxThreads(int maxThreads);
         int getMaxThreads() const;
+		void moveAgent(Ped::Tagent* agent);
+		void tick_region_impl();
+    	Region* getRegionFor(int x, int y);
 
 	private:
 
@@ -92,6 +111,15 @@ namespace Ped{
 		// Moves an agent towards its next position
 		void move(Ped::Tagent *agent);
 
+		std::vector<Region> regions;      // all regions
+		int numRegionsX = 2;              // number of regions along X
+		int numRegionsY = 2;              // number of regions along Y
+		int worldWidth = 100;             // total width of the world
+		int worldHeight = 100;
+
+		std::vector<std::vector<std::unique_ptr<std::mutex>>> cellLocks;
+		std::vector<std::vector<bool>> cellOccupied;
+
 		int max_threads = 2; 
 
 		////////////
@@ -99,7 +127,7 @@ namespace Ped{
 		///////////////////////////////////////////////
 
 		// Returns the set of neighboring agents for the specified position
-		set<const Ped::Tagent*> getNeighbors(int x, int y, int dist) const;
+		set<const Ped::Tagent*> getNeighbors(int x, int y, int dist, const Ped::Tagent* self = nullptr) const;
 
 		////////////
 		/// Everything below here won't be relevant until Assignment 4

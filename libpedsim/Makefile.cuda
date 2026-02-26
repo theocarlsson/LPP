@@ -1,0 +1,35 @@
+# libpedsim CUDA Makefile for Ubuntu
+CXX = g++
+NVCC = nvcc
+
+# Compiler flags
+CXXFLAGS = -O3 -std=c++17 -pthread -mavx2 -mfma
+CUDAFLAGS = -O3 -arch=sm_86  # adjust sm_XX for your GPU
+
+# Linker flags
+LDFLAGS = -lcudart
+
+# Source files
+SOURCES = $(wildcard *.cpp *.cu)
+OBJECTS = $(SOURCES:.cpp=.o)
+OBJECTS := $(OBJECTS:.cu=.o)
+
+# Target static library
+TARGET = libpedsim.a
+
+all: $(TARGET)
+
+# Compile C++ files
+%.o: %.cpp
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# Compile CUDA files
+%.o: %.cu
+	$(NVCC) $(CUDAFLAGS) -c $< -o $@
+
+# Create static library
+$(TARGET): $(OBJECTS)
+	ar rcs $@ $^
+
+clean:
+	rm -f $(OBJECTS) $(TARGET)
