@@ -2,6 +2,55 @@
 #include "device_launch_parameters.h"
 
 #include <stdio.h>
+#include "cuda_testkernel.h"
+#include <cuda_runtime.h>
+#include <cmath>
+
+__global__ void updateDesiredPositionsKernel(
+    int N,
+    float* posX,
+    float* posY,
+    float* destX,
+    float* destY,
+    float* desiredX,
+    float* desiredY
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+
+    float dx = destX[i] - posX[i];
+    float dy = destY[i] - posY[i];
+    float len = sqrtf(dx*dx + dy*dy);
+
+    if (len > 1e-6f) {
+        desiredX[i] = posX[i] + dx / len; // move 1 unit
+        desiredY[i] = posY[i] + dy / len;
+    } else {
+        desiredX[i] = posX[i];
+        desiredY[i] = posY[i];
+    }
+}
+
+// Wrapper callable from C++ code
+void updateDesiredPositionsCuda(
+    int N,
+    float* posX,
+    float* posY,
+    float* destX,
+    float* destY,
+    float* desiredX,
+    float* desiredY
+) {
+    int threadsPerBlock = 256;
+    int blocks = (N + threadsPerBlock - 1) / threadsPerBlock;
+
+    updateDesiredPositionsKernel<<<blocks, threadsPerBlock>>>(
+        N, posX, posY, destX, destY, desiredX, desiredY
+    );
+
+    cudaDeviceSynchronize(); // wait for kernel to finish
+}
+
 
 cudaError_t addWithCuda(int *c, const int *a, const int *b, unsigned int size);
 

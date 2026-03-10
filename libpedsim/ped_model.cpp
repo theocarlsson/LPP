@@ -25,8 +25,10 @@
 
 #ifndef NOCDUA
 #include "cuda_testkernel.h"
-#endif
 
+#include "heatmap_cuda.h"
+#include "heatmap_seq.cpp"
+#endif
 #include <stdlib.h>
 
 std::mutex gridMutex;
@@ -213,6 +215,7 @@ void Ped::Model::moveAgent(Ped::Tagent* agent)
 static void tick_seq_impl(const std::vector<Ped::Tagent*>& agents,
                           Ped::Model* model) {
     for (Ped::Tagent* a : agents) a->computeNextDesiredPosition();
+    model->updateHeatmapCuda();
     for (Ped::Tagent* a : agents) {
         model->moveAgent(a);
     }
@@ -359,7 +362,48 @@ Ped::Region* Ped::Model::getRegionFor(int x, int y) {
     }
     return nullptr; // fallback
 }
+#ifndef NOCDUA
+namespace Ped {
 
+void tick_cuda_impl(Model* model) {
+    int N = (int)model->agents.size();
+    if (N == 0) return;
+
+    for (int i = 0; i < N; ++i) {
+        model->posX[i] = (float)model->agents[i]->getX();
+        model->posY[i] = (float)model->agents[i]->getY();
+
+        Ped::Twaypoint* dest = model->agents[i]->getDestination();
+        if (dest != nullptr) {
+            model->destX[i] = dest->getx();
+            model->destY[i] = dest->gety();
+        } else {
+            model->destX[i] = model->posX[i];
+            model->destY[i] = model->posY[i];
+        }
+    }
+
+    // Call the CUDA kernel in global namespace
+    ::updateDesiredPositionsCuda(
+        N,
+        model->posX.data(),
+        model->posY.data(),
+        model->destX.data(),
+        model->destY.data(),
+        model->desiredX.data(),
+        model->desiredY.data()
+    );
+
+    model->updateHeatmapCuda();
+
+    for (int i = 0; i < N; ++i) {
+        model->agents[i]->setX((int)(model->desiredX[i] + 0.5f));
+        model->agents[i]->setY((int)(model->desiredY[i] + 0.5f));
+    }
+}
+
+} // namespace Ped
+#endif
 
 void Ped::Model::tick()
 {
@@ -471,7 +515,14 @@ void Ped::Model::tick()
             }
 
             break;
+
+
         }
+        #ifndef NOCDUA
+        case Ped::CUDA:
+            tick_cuda_impl(this);
+            break;
+        #endif
         default:
             tick_seq_impl(agents, this);
             break;

@@ -69,6 +69,9 @@ namespace Ped{
 		void moveAgent(Ped::Tagent* agent);
 		void tick_region_impl();
     	Region* getRegionFor(int x, int y);
+		void updateHeatmapCuda();
+
+		friend void tick_cuda_impl(Ped::Model* model);
 
 	private:
 
