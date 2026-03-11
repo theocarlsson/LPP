@@ -144,7 +144,7 @@ int main(int argc, char*argv[]) {
 
         if (timing_mode) {
             // Timing version (repeats for stability)
-            int repeats = 10;
+            int repeats = 1;
             double avg_seq_ms = 0.0;
             double avg_target_ms = 0.0;
 

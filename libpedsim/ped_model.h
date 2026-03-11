@@ -43,7 +43,9 @@ namespace Ped{
 	class Model
 	{
 	public:
-
+		int* h_agentX = nullptr;
+		int* h_agentY = nullptr;
+		void updateHeatmapCudaAsync(bool needsResult = false);
 		// Sets everything up
 		void setup(std::vector<Tagent*> agentsInScenario, std::vector<Twaypoint*> destinationsInScenario,IMPLEMENTATION implementation, int max_threads);
 		
@@ -70,11 +72,20 @@ namespace Ped{
 		void tick_region_impl();
     	Region* getRegionFor(int x, int y);
 		void updateHeatmapCuda();
+		void tick_seq_impl(const std::vector<Ped::Tagent*>& agents, Ped::Model* model);
 
 		friend void tick_cuda_impl(Ped::Model* model);
 
-	private:
+		void syncHeatmapCuda();
+		void setupHeatmapCuda();
 
+	private:
+		void* ev0 = nullptr;
+		void* ev1 = nullptr;
+		void* ev2 = nullptr;
+		void* ev3 = nullptr;
+		void* ev4 = nullptr;
+		void* ev5 = nullptr;
 		// Denotes which implementation (sequential, parallel implementations..)
 		// should be used for calculating the desired positions of
 		// agents (Assignment 1)
@@ -137,7 +148,7 @@ namespace Ped{
 		///////////////////////////////////////////////
 
 #define SIZE 1024
-#define CELLSIZE 5
+#define CELLSIZE 8
 #define SCALED_SIZE SIZE*CELLSIZE
 
 		// The heatmap representing the density of agents

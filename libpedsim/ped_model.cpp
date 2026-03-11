@@ -23,9 +23,9 @@
 #include <unordered_set>
 #include <memory>
 
-#ifndef NOCDUA
+#ifndef NOCUDA
+#include <cuda_runtime.h>
 #include "cuda_testkernel.h"
-
 #include "heatmap_cuda.h"
 #include "heatmap_seq.cpp"
 #endif
@@ -83,7 +83,12 @@ void Ped::Model::setup(std::vector<Ped::Tagent*> agentsInScenario, std::vector<T
 	if (max_threads > 0) this->setMaxThreads(max_threads);
 
 	// Set up heatmap (relevant for Assignment 4)
-	setupHeatmapSeq();
+	#ifndef NOCUDA
+        if (implementation == Ped::CUDA)
+            setupHeatmapCuda();
+        else
+    #endif
+        setupHeatmapSeq();
 
     int regionWidth  = worldWidth  / numRegionsX;
     int regionHeight = worldHeight / numRegionsY;
@@ -138,6 +143,13 @@ void Ped::Model::setup(std::vector<Ped::Tagent*> agentsInScenario, std::vector<T
     for (int x = 0; x < worldWidth; ++x) {
         cellOccupied[x].resize(worldHeight, false);
     }
+
+    #ifndef NOCUDA
+        if (implementation == Ped::CUDA) {
+            cudaMallocHost(&h_agentX, agents.size() * sizeof(int));
+            cudaMallocHost(&h_agentY, agents.size() * sizeof(int));
+        }
+    #endif      
 }
 
 
@@ -212,13 +224,21 @@ void Ped::Model::moveAgent(Ped::Tagent* agent)
 }
 
 
-static void tick_seq_impl(const std::vector<Ped::Tagent*>& agents,
-                          Ped::Model* model) {
+void Ped::Model::tick_seq_impl(const std::vector<Ped::Tagent*>& agents,
+                               Ped::Model* model) {
     for (Ped::Tagent* a : agents) a->computeNextDesiredPosition();
-    model->updateHeatmapCuda();
-    for (Ped::Tagent* a : agents) {
-        model->moveAgent(a);
-    }
+    
+    auto t0 = std::chrono::steady_clock::now();
+    model->updateHeatmapSeq();
+    auto t1 = std::chrono::steady_clock::now();
+    
+    static int count = 0;
+    if (count++ < 5)
+        std::cerr << "SEQ heatmap: " 
+                  << std::chrono::duration_cast<std::chrono::microseconds>(t1-t0).count() 
+                  << " us\n" << std::flush;
+    
+    for (Ped::Tagent* a : agents) model->moveAgent(a);
 }
 /*
 static void tick_omp_impl(const std::vector<Ped::Tagent*>& agents) {
@@ -362,51 +382,54 @@ Ped::Region* Ped::Model::getRegionFor(int x, int y) {
     }
     return nullptr; // fallback
 }
-#ifndef NOCDUA
+
 namespace Ped {
 
 void tick_cuda_impl(Model* model) {
     int N = (int)model->agents.size();
     if (N == 0) return;
 
+    // CPU: compute desired positions AND prepare heatmap input together
     for (int i = 0; i < N; ++i) {
-        model->posX[i] = (float)model->agents[i]->getX();
-        model->posY[i] = (float)model->agents[i]->getY();
-
-        Ped::Twaypoint* dest = model->agents[i]->getDestination();
-        if (dest != nullptr) {
-            model->destX[i] = dest->getx();
-            model->destY[i] = dest->gety();
-        } else {
-            model->destX[i] = model->posX[i];
-            model->destY[i] = model->posY[i];
-        }
+        model->agents[i]->computeNextDesiredPosition();
+        // Fill pinned buffers here while data is hot in cache
+        model->h_agentX[i] = model->agents[i]->getDesiredX();
+        model->h_agentY[i] = model->agents[i]->getDesiredY();
     }
 
-    // Call the CUDA kernel in global namespace
-    ::updateDesiredPositionsCuda(
-        N,
-        model->posX.data(),
-        model->posY.data(),
-        model->destX.data(),
-        model->destY.data(),
-        model->desiredX.data(),
-        model->desiredY.data()
-    );
+    // GPU: now launches fast - buffers already filled
+    auto cpu_start = std::chrono::steady_clock::now();
+    model->updateHeatmapCudaAsync(false);
+    auto gpu_launched = std::chrono::steady_clock::now();
 
-    model->updateHeatmapCuda();
+    // CPU collision runs HERE while GPU does heatmap
+    for (int i = 0; i < N; ++i)
+        model->moveAgent(model->agents[i]);
 
-    for (int i = 0; i < N; ++i) {
-        model->agents[i]->setX((int)(model->desiredX[i] + 0.5f));
-        model->agents[i]->setY((int)(model->desiredY[i] + 0.5f));
+    auto cpu_done = std::chrono::steady_clock::now();
+    model->syncHeatmapCuda();
+    auto gpu_done = std::chrono::steady_clock::now();
+
+    static int count = 0;
+    if (count++ < 5) {
+        auto gpu_launch_us = std::chrono::duration_cast<std::chrono::microseconds>(gpu_launched - cpu_start).count();
+        auto cpu_work_us   = std::chrono::duration_cast<std::chrono::microseconds>(cpu_done - gpu_launched).count();
+        auto sync_wait_us  = std::chrono::duration_cast<std::chrono::microseconds>(gpu_done - cpu_done).count();
+        auto total_us      = std::chrono::duration_cast<std::chrono::microseconds>(gpu_done - cpu_start).count();
+        std::cerr << "--- Tick overlap proof ---\n"
+                  << "  GPU launch overhead : " << gpu_launch_us << " us\n"
+                  << "  CPU collision work  : " << cpu_work_us   << " us\n"
+                  << "  Sync wait (GPU tail): " << sync_wait_us  << " us\n"
+                  << "  Total               : " << total_us      << " us\n" << std::flush;
     }
 }
-
-} // namespace Ped
-#endif
+}
 
 void Ped::Model::tick()
 {
+    for (int x = 0; x < worldWidth; ++x)
+        std::fill(cellOccupied[x].begin(), cellOccupied[x].end(), false);
+
     reservedPositions.clear();
     int mt = this->max_threads;
     if (mt == 0) mt = get_max_threads_from_env();
@@ -428,6 +451,9 @@ void Ped::Model::tick()
 
         case Ped::REGION:
             tick_region_impl();
+            break;
+        case Ped::CUDA:
+            tick_cuda_impl(this);
             break;
 
         case Ped::VECTOR:
@@ -518,11 +544,7 @@ void Ped::Model::tick()
 
 
         }
-        #ifndef NOCDUA
-        case Ped::CUDA:
-            tick_cuda_impl(this);
-            break;
-        #endif
+
         default:
             tick_seq_impl(agents, this);
             break;
@@ -608,6 +630,10 @@ void Ped::Model::cleanup() {
 
 Ped::Model::~Model()
 {
-	std::for_each(agents.begin(), agents.end(), [](Ped::Tagent *agent){delete agent;});
-	std::for_each(destinations.begin(), destinations.end(), [](Ped::Twaypoint *destination){delete destination; });
+#ifndef NOCUDA
+    if (h_agentX) { cudaFreeHost(h_agentX); h_agentX = nullptr; }
+    if (h_agentY) { cudaFreeHost(h_agentY); h_agentY = nullptr; }
+#endif
+    std::for_each(agents.begin(), agents.end(), [](Ped::Tagent *agent){delete agent;});
+    std::for_each(destinations.begin(), destinations.end(), [](Ped::Twaypoint *destination){delete destination;});
 }
