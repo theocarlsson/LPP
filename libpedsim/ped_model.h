@@ -14,20 +14,38 @@
 #include <vector>
 #include <map>
 #include <set>
+#include <mutex>
+#include <memory>
 
 #include "ped_agent.h"
 
 namespace Ped{
 	class Tagent;
 
+	struct Region {
+		int x0, y0, x1, y1;
+		std::vector<Tagent*> agents;
+		std::mutex borderMutex;
+		std::vector<Tagent*> agentsToTransfer;
+
+		Region() = default;
+
+		Region(const Region&) = delete;
+		Region& operator=(const Region&) = delete;
+		Region(Region&&) = delete;
+		Region& operator=(Region&&) = delete;
+	};
+
 	// The implementation modes for Assignment 1 + 2:
 	// chooses which implementation to use for tick()
-	enum IMPLEMENTATION { CUDA, VECTOR, OMP, PTHREAD, SEQ, SIMD };
+	enum IMPLEMENTATION { CUDA, VECTOR, OMP, PTHREAD, SEQ, SIMD, REGION };
 
 	class Model
 	{
 	public:
-
+		int* h_agentX = nullptr;
+		int* h_agentY = nullptr;
+		void updateHeatmapCudaAsync(bool needsResult = false);
 		// Sets everything up
 		void setup(std::vector<Tagent*> agentsInScenario, std::vector<Twaypoint*> destinationsInScenario,IMPLEMENTATION implementation, int max_threads);
 		
@@ -50,9 +68,24 @@ namespace Ped{
 
 		void setMaxThreads(int maxThreads);
         int getMaxThreads() const;
+		void moveAgent(Ped::Tagent* agent);
+		void tick_region_impl();
+    	Region* getRegionFor(int x, int y);
+		void updateHeatmapCuda();
+		void tick_seq_impl(const std::vector<Ped::Tagent*>& agents, Ped::Model* model);
+
+		friend void tick_cuda_impl(Ped::Model* model);
+
+		void syncHeatmapCuda();
+		void setupHeatmapCuda();
 
 	private:
-
+		void* ev0 = nullptr;
+		void* ev1 = nullptr;
+		void* ev2 = nullptr;
+		void* ev3 = nullptr;
+		void* ev4 = nullptr;
+		void* ev5 = nullptr;
 		// Denotes which implementation (sequential, parallel implementations..)
 		// should be used for calculating the desired positions of
 		// agents (Assignment 1)
@@ -92,6 +125,15 @@ namespace Ped{
 		// Moves an agent towards its next position
 		void move(Ped::Tagent *agent);
 
+		std::vector<Region> regions;      // all regions
+		int numRegionsX = 2;              // number of regions along X
+		int numRegionsY = 2;              // number of regions along Y
+		int worldWidth = 100;             // total width of the world
+		int worldHeight = 100;
+
+		std::vector<std::vector<std::unique_ptr<std::mutex>>> cellLocks;
+		std::vector<std::vector<bool>> cellOccupied;
+
 		int max_threads = 2; 
 
 		////////////
@@ -99,14 +141,14 @@ namespace Ped{
 		///////////////////////////////////////////////
 
 		// Returns the set of neighboring agents for the specified position
-		set<const Ped::Tagent*> getNeighbors(int x, int y, int dist) const;
+		set<const Ped::Tagent*> getNeighbors(int x, int y, int dist, const Ped::Tagent* self = nullptr) const;
 
 		////////////
 		/// Everything below here won't be relevant until Assignment 4
 		///////////////////////////////////////////////
 
 #define SIZE 1024
-#define CELLSIZE 5
+#define CELLSIZE 8
 #define SCALED_SIZE SIZE*CELLSIZE
 
 		// The heatmap representing the density of agents
