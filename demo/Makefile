@@ -1,1 +1,1 @@
-Makefile.qt
+Makefile.noqt
