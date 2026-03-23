@@ -1,65 +1,76 @@
-import subprocess
-import re
+#!/usr/bin/env python3
+"""
+Simple speedup plot: SEQ vs REGION
+Run from the LPP root: python3 speedup.py
+"""
+
+import subprocess, re, sys
 import matplotlib.pyplot as plt
+import numpy as np
 
-# Configuration
-executable = "/LPP/skeleton/Assignment2/LPP/demo/demo"  # Replace with your compiled executable
-scenario_file = "hugeScenario.xml"
-max_steps = 500
-implementations = ["seq", "simd", "omp"]
-thread_counts = [1, 2, 4, 8, 12]  # Only relevant for omp/simd
+DEMO     = "./demo/demo"
+SCENARIO = "scenario.xml"
+STEPS    = 1000
+REPEATS  = 3
+THREADS  = 8
 
-# Function to run the simulation and parse time
-def run_simulation(impl, threads):
-    cmd = [executable, "--timing-mode", f"--max-steps={max_steps}"]
-    
-    if impl == "seq":
-        cmd.append("--seq")
-    elif impl == "simd":
-        cmd.append("--simd")
-        cmd += ["--max-threads", str(threads)]
-    elif impl == "omp":
-        cmd.append("--omp")
-        cmd += ["--max-threads", str(threads)]
-    
-    cmd.append(scenario_file)
-    
-    print(f"Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    
-    # Try to extract "Target average time: XXX ms" from output
-    match = re.search(r"Target average time: ([0-9.]+) ms", result.stdout)
-    if match:
-        return float(match.group(1))
-    else:
-        print("Warning: Could not parse output")
-        print(result.stdout)
-        return None
+def run(flag):
+    cmd = [DEMO, "--timing-mode", flag,
+           f"--max-steps={STEPS}", f"--max-threads={THREADS}", SCENARIO]
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    txt = out.stdout + out.stderr
+    seq  = re.search(r"SEQ average time:\s+([\d.]+)", txt)
+    tgt  = re.search(r"Target average time:\s+([\d.]+)", txt)
+    spd  = re.search(r"Speedup:\s+([\d.]+)", txt)
+    return (float(seq.group(1)) if seq else None,
+            float(tgt.group(1)) if tgt else None,
+            float(spd.group(1)) if spd else None)
 
-# Store results
-results = {impl: [] for impl in implementations}
+print(f"Running {REPEATS} repeats ({STEPS} steps each)...\n")
 
-# Run simulations
-for impl in implementations:
-    if impl == "seq":
-        # Sequential does not depend on threads
-        time_ms = run_simulation(impl, 1)
-        results[impl] = [time_ms] * len(thread_counts)
-    else:
-        for threads in thread_counts:
-            time_ms = run_simulation(impl, threads)
-            results[impl].append(time_ms)
+seq_times, reg_times, speedups = [], [], []
+for i in range(REPEATS):
+    s, r, sp = run("--region")
+    if s and r and sp:
+        seq_times.append(s); reg_times.append(r); speedups.append(sp)
+        print(f"  Run {i+1}: SEQ={s:.0f}ms  REGION={r:.0f}ms  Speedup={sp:.2f}x")
 
-# Plot results
-plt.figure(figsize=(10,6))
-for impl in implementations:
-    plt.plot(thread_counts, results[impl], marker='o', label=impl.upper())
+if not speedups:
+    print("No results — check demo path and scenario."); sys.exit(1)
 
-plt.xlabel("Number of Threads")
-plt.ylabel("Execution Time (ms)")
-plt.title("Crowd Simulation Performance")
-plt.xticks(thread_counts)
-plt.grid(True)
-plt.legend()
-plt.savefig("crowd_sim_performance.png", dpi=300)
-print("Plot saved as crowd_sim_performance.png")
+avg_seq = np.mean(seq_times)
+avg_reg = np.mean(reg_times)
+avg_spd = np.mean(speedups)
+
+print(f"\nAverage SEQ:    {avg_seq:.0f} ms")
+print(f"Average REGION: {avg_reg:.0f} ms")
+print(f"Average Speedup: {avg_spd:.2f}x")
+
+# ── plot ──────────────────────────────────────────────────────────────────────
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
+fig.suptitle(f"SEQ vs REGION  ({STEPS} steps, {THREADS} threads)", fontsize=13)
+
+# Bar: avg time
+ax1.bar(["SEQ", "REGION"], [avg_seq, avg_reg],
+        color=["#4a90d9", "#e8524a"], width=0.5)
+ax1.set_ylabel("Time (ms)")
+ax1.set_title("Average Execution Time")
+for x, v in enumerate([avg_seq, avg_reg]):
+    ax1.text(x, v + avg_seq*0.01, f"{v:.0f} ms", ha="center", fontweight="bold")
+
+# Bar: speedup per run + average line
+runs = list(range(1, REPEATS+1))
+ax2.bar(runs, speedups, color="#50c878", width=0.5)
+ax2.axhline(avg_spd, color="orange", linewidth=2, linestyle="--",
+            label=f"avg {avg_spd:.2f}x")
+ax2.axhline(1.0, color="gray", linewidth=1, linestyle=":")
+ax2.set_xlabel("Run")
+ax2.set_ylabel("Speedup (×)")
+ax2.set_title("Speedup per Run")
+ax2.legend()
+ax2.set_xticks(runs)
+
+plt.tight_layout()
+plt.savefig("speedup.png", dpi=150, bbox_inches="tight")
+print("\nSaved: speedup.png")
+plt.show()

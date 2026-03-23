@@ -108,9 +108,8 @@ void Ped::Model::setup(std::vector<Ped::Tagent*> agentsInScenario, std::vector<T
 
             r.x0 = rx * regionWidth;
             r.y0 = ry * regionHeight;
-            // Ensure last region doesn't exceed world size
-            if (rx == numRegionsX - 1) r.x1 = worldWidth;
-            if (ry == numRegionsY - 1) r.y1 = worldHeight;
+            r.x1 = (rx == numRegionsX - 1) ? worldWidth  : (rx + 1) * regionWidth;
+            r.y1 = (ry == numRegionsY - 1) ? worldHeight : (ry + 1) * regionHeight;
         }
     }
 
@@ -229,7 +228,7 @@ void Ped::Model::tick_seq_impl(const std::vector<Ped::Tagent*>& agents,
     for (Ped::Tagent* a : agents) a->computeNextDesiredPosition();
     
     auto t0 = std::chrono::steady_clock::now();
-    model->updateHeatmapSeq();
+    //model->updateHeatmapSeq();
     auto t1 = std::chrono::steady_clock::now();
     
     static int count = 0;
@@ -325,6 +324,12 @@ static void tick_threads_impl(const std::vector<Ped::Tagent*>& agents, Ped::Mode
 }
 
 void Ped::Model::tick_region_impl() {
+    for (Ped::Tagent* agent : agents) {
+        int x = agent->getX();
+        int y = agent->getY();
+        if (x >= 0 && x < worldWidth && y >= 0 && y < worldHeight)
+            cellOccupied[x][y] = true;
+    }
     // Phase 1: parallel per region
     #pragma omp parallel for
     for (int ri = 0; ri < (int)regions.size(); ++ri) {
@@ -337,20 +342,11 @@ void Ped::Model::tick_region_impl() {
             int newY = agent->getDesiredY();
 
             // check if inside region
-            if (newX >= r.x0 && newX < r.x1 && newY >= r.y0 && newY < r.y1) {
-                agent->setX(newX);
-                agent->setY(newY);
-            } else {
-                // Crossed border → store for transfer
-                if (newX < 0 || newX >= worldWidth || newY < 0 || newY >= worldHeight) {
-                    std::cerr << "Warning: agent out of bounds: " << newX << "," << newY << std::endl;
-                    newX = std::max(0, std::min(newX, worldWidth-1));
-                    newY = std::max(0, std::min(newY, worldHeight-1));
-                }
-                std::lock_guard<std::mutex> lock(*cellLocks[newX][newY]);
+             moveAgent(agent);
+
+    // if agent crossed border, schedule transfer
+            if (newX < r.x0 || newX >= r.x1 || newY < r.y0 || newY >= r.y1) {
                 r.agentsToTransfer.push_back(agent);
-                agent->setX(newX);
-                agent->setY(newY);
             }
         }
     }
@@ -572,20 +568,43 @@ long long encodePos(int x, int y) {
 
 void Ped::Model::move(Ped::Tagent *agent)
 {
-	 int x0 = agent->getX();
+    int x0 = agent->getX();
     int y0 = agent->getY();
     int dx = agent->getDesiredX();
     int dy = agent->getDesiredY();
 
-    std::vector<std::pair<int,int>> candidates = {
-        {dx, dy},
-        {x0+1, y0}, {x0-1, y0}, {x0, y0+1}, {x0, y0-1},
-        {x0+1, y0+1}, {x0-1, y0-1}, {x0+1, y0-1}, {x0-1, y0+1}
-    };
+    // Determine direction of travel
+    int dirX = dx - x0;  // positive = moving right, negative = moving left
+    int dirY = dy - y0;
+
+    std::vector<std::pair<int,int>> candidates;
+    candidates.push_back({dx, dy}); // first try desired position
+
+    if (dirX > 0) {
+        // Moving right → prefer diagonal right
+        candidates.push_back({x0+1, y0+1});
+        candidates.push_back({x0+1, y0-1});
+        candidates.push_back({x0, y0+1});
+        candidates.push_back({x0, y0-1});
+        candidates.push_back({x0+1, y0});
+    } else if (dirX < 0) {
+        // Moving left → prefer diagonal left
+        candidates.push_back({x0-1, y0-1});
+        candidates.push_back({x0-1, y0+1});
+        candidates.push_back({x0, y0-1});
+        candidates.push_back({x0, y0+1});
+        candidates.push_back({x0-1, y0});
+    } else {
+        // Moving vertically
+        candidates.push_back({x0, y0+1});
+        candidates.push_back({x0, y0-1});
+        candidates.push_back({x0+1, y0});
+        candidates.push_back({x0-1, y0});
+    }
 
     for (auto& pos : candidates) {
         if (pos.first < 0 || pos.second < 0 ||
-        pos.first >= worldWidth || pos.second >= worldHeight) continue;
+            pos.first >= worldWidth || pos.second >= worldHeight) continue;
 
         std::lock_guard<std::mutex> lock(*cellLocks[pos.first][pos.second]);
         if (!cellOccupied[pos.first][pos.second]) {
@@ -597,6 +616,8 @@ void Ped::Model::move(Ped::Tagent *agent)
     }
 
     // Stay in place
+    std::lock_guard<std::mutex> lock(*cellLocks[x0][y0]);
+    cellOccupied[x0][y0] = true;
     agent->setX(x0);
     agent->setY(y0);
 }

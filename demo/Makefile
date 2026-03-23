@@ -1,1 +1,1 @@
-Makefile.noqt
+Makefile.macos

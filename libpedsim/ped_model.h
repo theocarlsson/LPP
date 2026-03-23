@@ -128,8 +128,8 @@ namespace Ped{
 		std::vector<Region> regions;      // all regions
 		int numRegionsX = 2;              // number of regions along X
 		int numRegionsY = 2;              // number of regions along Y
-		int worldWidth = 100;             // total width of the world
-		int worldHeight = 100;
+		int worldWidth = 200;             // total width of the world
+		int worldHeight = 140;
 
 		std::vector<std::vector<std::unique_ptr<std::mutex>>> cellLocks;
 		std::vector<std::vector<bool>> cellOccupied;
